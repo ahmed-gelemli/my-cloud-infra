@@ -242,3 +242,31 @@ resource "aws_ecs_service" "apps" {
   # Allow the service to be created even if the ALB isn't perfectly ready yet
   depends_on = [aws_lb_listener.http]
 }
+
+# 13. Route 53 Hosted Zone (The "Phone Book" for your domain)
+resource "aws_route53_zone" "main" {
+  name = "ismysimpleproject.com"
+}
+
+# 14. DNS Records (The "Entries" in the phone book)
+# This loops through your apps and points "app.domain.com" -> ALB
+resource "aws_route53_record" "app_aliases" {
+  for_each = toset(["eas"]) # "focusbee", "readright" commented out
+  
+  zone_id = aws_route53_zone.main.zone_id
+  name    = "${each.key}.ismysimpleproject.com" # e.g. eas.ismysimpleproject.com
+  type    = "A"
+
+  # The "Alias" block is AWS magic. It points to the ALB internally.
+  # It is faster and cheaper than a CNAME record.
+  alias {
+    name                   = aws_lb.main.dns_name
+    zone_id                = aws_lb.main.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# Output the Name Servers (You need these for Step 2)
+output "nameservers" {
+  value = aws_route53_zone.main.name_servers
+}
