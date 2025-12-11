@@ -1,3 +1,6 @@
+# Note: focusbee and readright projects will be added in the future
+# Currently only deploying the eas service
+
 # 1. Provider & Data Sources
 provider "aws" {
   region = "us-east-1" # Change to your region
@@ -17,7 +20,7 @@ data "aws_subnets" "default" {
 
 # 2. ECR Repositories (Where your Docker images live)
 resource "aws_ecr_repository" "repos" {
-  for_each = toset(["eas-service", "focusbee-service", "readright-service"])
+  for_each = toset(["eas-service"]) # "focusbee-service", "readright-service" commented out
   name     = each.key
 }
 
@@ -148,7 +151,7 @@ resource "aws_lb" "main" {
 
 # 9. Target Groups (The empty buckets for traffic)
 resource "aws_lb_target_group" "apps" {
-  for_each    = toset(["eas", "focusbee", "readright"])
+  for_each    = toset(["eas"]) # "focusbee", "readright" commented out
   name        = "${each.key}-tg"
   port        = 80
   protocol    = "HTTP"
@@ -179,7 +182,7 @@ resource "aws_lb_listener" "http" {
 
 # 11. Listener Rules (Host-based Routing)
 resource "aws_lb_listener_rule" "host_based_routing" {
-  for_each     = toset(["eas", "focusbee", "readright"])
+  for_each     = toset(["eas"]) # "focusbee", "readright" commented out
   listener_arn = aws_lb_listener.http.arn
 
   action {
@@ -194,14 +197,14 @@ resource "aws_lb_listener_rule" "host_based_routing" {
   }
 }
 # 12. Task Definitions & Services
-# We loop through your 3 apps to save code
+# We loop through your apps to save code
 resource "aws_ecs_task_definition" "apps" {
-  for_each                 = toset(["eas", "focusbee", "readright"])
+  for_each                 = toset(["eas"]) # "focusbee", "readright" commented out
   family                   = each.key
   network_mode             = "bridge" # Required for dynamic host ports
   requires_compatibilities = ["EC2"]
   cpu                      = 256
-  memory                   = 256 # Fits 3 apps (256x3=768) on a 1GB server easily
+  memory                   = 256 # Fits apps on a 1GB server easily
 
   container_definitions = jsonencode([
     {
@@ -223,7 +226,7 @@ resource "aws_ecs_task_definition" "apps" {
 }
 
 resource "aws_ecs_service" "apps" {
-  for_each        = toset(["eas", "focusbee", "readright"])
+  for_each        = toset(["eas"]) # "focusbee", "readright" commented out
   name            = "${each.key}-service"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.apps[each.key].arn
