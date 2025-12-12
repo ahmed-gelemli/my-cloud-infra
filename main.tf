@@ -1,9 +1,12 @@
-# Note: focusbee and readright projects will be added in the future
-# Currently only deploying the eas service
+# Note: readright will be added in the future
 
 # 1. Provider & Data Sources
 provider "aws" {
   region = "us-east-1" # Change to your region
+}
+
+locals {
+  apps = toset(["eas", "focusbee"])
 }
 
 # Get default VPC and Subnets automatically
@@ -20,7 +23,7 @@ data "aws_subnets" "default" {
 
 # 2. ECR Repositories (Where your Docker images live)
 resource "aws_ecr_repository" "repos" {
-  for_each = toset(["eas-service"]) # "focusbee-service", "readright-service" commented out
+  for_each = toset([for app in local.apps : "${app}-service"])
   name     = each.key
 }
 
@@ -110,7 +113,7 @@ resource "aws_launch_template" "ecs_nodes" {
   name_prefix   = "ecs-node-"
   image_id      = data.aws_ssm_parameter.ecs_optimized_ami.value
   instance_type = "t3.micro"
-  
+
   iam_instance_profile {
     name = aws_iam_instance_profile.ecs_agent.name
   }
@@ -124,6 +127,7 @@ resource "aws_launch_template" "ecs_nodes" {
   user_data = base64encode(<<-EOF
               #!/bin/bash
               echo ECS_CLUSTER=${aws_ecs_cluster.main.name} >> /etc/ecs/ecs.config
+              echo ECS_IMAGE_PULL_BEHAVIOR=always >> /etc/ecs/ecs.config
               EOF
   )
 }
@@ -151,7 +155,7 @@ resource "aws_lb" "main" {
 
 # 9. Target Groups (The empty buckets for traffic)
 resource "aws_lb_target_group" "apps" {
-  for_each    = toset(["eas"]) # "focusbee", "readright" commented out
+  for_each    = local.apps
   name        = "${each.key}-tg"
   port        = 80
   protocol    = "HTTP"
@@ -182,7 +186,7 @@ resource "aws_lb_listener" "http" {
 
 # 11. Listener Rules (Host-based Routing)
 resource "aws_lb_listener_rule" "host_based_routing" {
-  for_each     = toset(["eas"]) # "focusbee", "readright" commented out
+  for_each     = local.apps
   listener_arn = aws_lb_listener.http.arn
 
   action {
@@ -199,7 +203,7 @@ resource "aws_lb_listener_rule" "host_based_routing" {
 # 12. Task Definitions & Services
 # We loop through your apps to save code
 resource "aws_ecs_task_definition" "apps" {
-  for_each                 = toset(["eas"]) # "focusbee", "readright" commented out
+  for_each                 = local.apps
   family                   = each.key
   network_mode             = "bridge" # Required for dynamic host ports
   requires_compatibilities = ["EC2"]
@@ -209,7 +213,6 @@ resource "aws_ecs_task_definition" "apps" {
   container_definitions = jsonencode([
     {
       name      = each.key
-      # In real life, use a variable for the image tag, e.g., ":latest" or ":v1"
       image     = "${aws_ecr_repository.repos["${each.key}-service"].repository_url}:latest"
       cpu       = 256
       memory    = 256
@@ -226,7 +229,7 @@ resource "aws_ecs_task_definition" "apps" {
 }
 
 resource "aws_ecs_service" "apps" {
-  for_each        = toset(["eas"]) # "focusbee", "readright" commented out
+  for_each        = local.apps
   name            = "${each.key}-service"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.apps[each.key].arn
@@ -238,7 +241,7 @@ resource "aws_ecs_service" "apps" {
     container_name   = each.key
     container_port   = 3000
   }
-  
+
   # Allow the service to be created even if the ALB isn't perfectly ready yet
   depends_on = [aws_lb_listener.http]
 }
@@ -251,8 +254,8 @@ resource "aws_route53_zone" "main" {
 # 14. DNS Records (The "Entries" in the phone book)
 # This loops through your apps and points "app.domain.com" -> ALB
 resource "aws_route53_record" "app_aliases" {
-  for_each = toset(["eas"]) # "focusbee", "readright" commented out
-  
+  for_each = local.apps
+
   zone_id = aws_route53_zone.main.zone_id
   name    = "${each.key}.ismysimpleproject.com" # e.g. eas.ismysimpleproject.com
   type    = "A"
