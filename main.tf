@@ -5,8 +5,98 @@ provider "aws" {
   region = "us-east-1" # Change to your region
 }
 
+variable "app_owner_usernames" {
+  description = "Optional map of app name -> IAM usernames that can manage that app's production secret."
+  type        = map(list(string))
+  default     = {}
+}
+
 locals {
   apps = toset(["eas", "focusbee"])
+}
+
+# Per-app production secrets live in Secrets Manager (values are set out-of-band by app owners).
+resource "aws_secretsmanager_secret" "app" {
+  for_each    = local.apps
+  name        = "apps/${each.key}/prod"
+  description = "Production runtime secrets for ${each.key} (JSON string)."
+}
+
+# Optional: per-app IAM groups/policies so each app owner can update only their secret.
+resource "aws_iam_group" "app_secret_owners" {
+  for_each = local.apps
+  name     = "app-${each.key}-secret-owners"
+}
+
+data "aws_iam_policy_document" "app_secret_owner" {
+  for_each = local.apps
+
+  statement {
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:UpdateSecret",
+    ]
+    resources = [aws_secretsmanager_secret.app[each.key].arn]
+  }
+}
+
+resource "aws_iam_policy" "app_secret_owner" {
+  for_each = local.apps
+  name     = "app-${each.key}-secret-owner-policy"
+  policy   = data.aws_iam_policy_document.app_secret_owner[each.key].json
+}
+
+resource "aws_iam_group_policy_attachment" "app_secret_owner" {
+  for_each   = local.apps
+  group      = aws_iam_group.app_secret_owners[each.key].name
+  policy_arn = aws_iam_policy.app_secret_owner[each.key].arn
+}
+
+resource "aws_iam_group_membership" "app_secret_owners" {
+  for_each = { for app, users in var.app_owner_usernames : app => users if length(users) > 0 }
+
+  name  = "app-${each.key}-secret-owners-membership"
+  group = aws_iam_group.app_secret_owners[each.key].name
+  users = each.value
+}
+
+# ECS tasks need an execution role to fetch secrets at startup.
+data "aws_iam_policy_document" "ecs_task_execution_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name               = "ecs-task-execution-role"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_execution_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_managed" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+data "aws_iam_policy_document" "ecs_task_execution_secrets" {
+  statement {
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = [for s in values(aws_secretsmanager_secret.app) : s.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_task_execution_secrets" {
+  name   = "ecs-task-execution-secrets"
+  role   = aws_iam_role.ecs_task_execution_role.id
+  policy = data.aws_iam_policy_document.ecs_task_execution_secrets.json
 }
 
 # Used for building ARNs in IAM policies
@@ -243,6 +333,7 @@ resource "aws_ecs_task_definition" "apps" {
   requires_compatibilities = ["EC2"]
   cpu                      = 256
   memory                   = 256 # Fits apps on a 1GB server easily
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
 
   container_definitions = jsonencode([
     {
@@ -264,6 +355,12 @@ resource "aws_ecs_task_definition" "apps" {
           containerPort = 3000 # Your fixed internal port
           hostPort      = 0    # The Magic 0 for dynamic mapping
           protocol      = "tcp"
+        }
+      ]
+      secrets = [
+        {
+          name      = "APP_SECRETS_JSON"
+          valueFrom = aws_secretsmanager_secret.app[each.key].arn
         }
       ]
     }
@@ -314,4 +411,12 @@ resource "aws_route53_record" "app_aliases" {
 # Output the Name Servers (You need these for Step 2)
 output "nameservers" {
   value = aws_route53_zone.main.name_servers
+}
+
+output "app_secret_arns" {
+  value = { for app, s in aws_secretsmanager_secret.app : app => s.arn }
+}
+
+output "app_secret_owner_groups" {
+  value = { for app, g in aws_iam_group.app_secret_owners : app => g.name }
 }
