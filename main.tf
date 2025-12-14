@@ -9,6 +9,9 @@ locals {
   apps = toset(["eas", "focusbee"])
 }
 
+# Used for building ARNs in IAM policies
+data "aws_caller_identity" "current" {}
+
 # Get default VPC and Subnets automatically
 data "aws_vpc" "default" {
   default = true
@@ -96,6 +99,30 @@ resource "aws_iam_role" "ecs_instance_role" {
 resource "aws_iam_role_policy_attachment" "ecs_agent" {
   role       = aws_iam_role.ecs_instance_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+resource "aws_iam_role_policy" "ecs_instance_cloudwatch_logs" {
+  name = "ecs-instance-cloudwatch-logs"
+  role = aws_iam_role.ecs_instance_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:DescribeLogStreams",
+          "logs:PutLogEvents"
+        ]
+        Resource = [
+          "arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:log-group:/ecs/*",
+          "arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:log-group:/ecs/*:log-stream:*"
+        ]
+      }
+    ]
+  })
 }
 
 resource "aws_iam_instance_profile" "ecs_agent" {
@@ -202,6 +229,13 @@ resource "aws_lb_listener_rule" "host_based_routing" {
 }
 # 12. Task Definitions & Services
 # We loop through your apps to save code
+
+resource "aws_cloudwatch_log_group" "ecs" {
+  for_each          = local.apps
+  name              = "/ecs/${each.key}"
+  retention_in_days = 14
+}
+
 resource "aws_ecs_task_definition" "apps" {
   for_each                 = local.apps
   family                   = each.key
@@ -217,6 +251,14 @@ resource "aws_ecs_task_definition" "apps" {
       cpu       = 256
       memory    = 256
       essential = true
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.ecs[each.key].name
+          awslogs-region        = "us-east-1"
+          awslogs-stream-prefix = "ecs"
+        }
+      }
       portMappings = [
         {
           containerPort = 3000 # Your fixed internal port
