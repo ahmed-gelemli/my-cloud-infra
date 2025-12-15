@@ -135,6 +135,13 @@ resource "aws_security_group" "alb_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -284,11 +291,58 @@ resource "aws_lb_target_group" "apps" {
   }
 }
 
+# 10.1 ACM Certificate (HTTPS)
+resource "aws_acm_certificate" "main" {
+  domain_name               = "*.ismysimpleproject.com"
+  subject_alternative_names = ["ismysimpleproject.com"]
+  validation_method         = "DNS"
+}
+
+resource "aws_route53_record" "acm_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.main.domain_validation_options :
+    dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  zone_id         = aws_route53_zone.main.zone_id
+  name            = each.value.name
+  type            = each.value.type
+  ttl             = 60
+  records         = [each.value.record]
+}
+
+resource "aws_acm_certificate_validation" "main" {
+  certificate_arn         = aws_acm_certificate.main.arn
+  validation_record_fqdns = [for r in aws_route53_record.acm_validation : r.fqdn]
+}
+
 # 10. Listener (The Traffic Cop)
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = "80"
   protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate_validation.main.certificate_arn
 
   # Default action: Return 404 if no host matches
   default_action {
@@ -304,7 +358,7 @@ resource "aws_lb_listener" "http" {
 # 11. Listener Rules (Host-based Routing)
 resource "aws_lb_listener_rule" "host_based_routing" {
   for_each     = local.apps
-  listener_arn = aws_lb_listener.http.arn
+  listener_arn = aws_lb_listener.https.arn
 
   action {
     type             = "forward"
@@ -382,7 +436,7 @@ resource "aws_ecs_service" "apps" {
   }
 
   # Allow the service to be created even if the ALB isn't perfectly ready yet
-  depends_on = [aws_lb_listener.http]
+  depends_on = [aws_lb_listener.https]
 }
 
 # 13. Route 53 Hosted Zone (The "Phone Book" for your domain)
