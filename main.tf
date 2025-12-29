@@ -2,7 +2,7 @@
 
 # 1. Provider & Data Sources
 provider "aws" {
-  region = "us-east-1" # Change to your region
+  region = "us-east-1"
 }
 
 variable "app_owner_usernames" {
@@ -114,13 +114,13 @@ data "aws_subnets" "default" {
   }
 }
 
-# 2. ECR Repositories (Where your Docker images live)
+# 2. ECR Repositories
 resource "aws_ecr_repository" "repos" {
   for_each = toset([for app in local.apps : "${app}-service"])
   name     = each.key
 }
 
-# 3. Security Groups (The Firewalls)
+# 3. Security Groups
 
 # ALB Security Group: Open to the world on port 80
 resource "aws_security_group" "alb_sg" {
@@ -160,7 +160,7 @@ resource "aws_security_group" "ecs_node_sg" {
     from_port       = 0
     to_port         = 65535
     protocol        = "tcp"
-    security_groups = [aws_security_group.alb_sg.id] # The Critical Link!
+    security_groups = [aws_security_group.alb_sg.id]
   }
 
   egress {
@@ -177,7 +177,7 @@ resource "aws_ecs_cluster" "main" {
   name = "my-cluster"
 }
 
-# 5. IAM Role for EC2 (So it can talk to ECS)
+# 5. IAM Role for EC2 instances
 data "aws_iam_policy_document" "ecs_agent" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -227,8 +227,8 @@ resource "aws_iam_instance_profile" "ecs_agent" {
   role = aws_iam_role.ecs_instance_role.name
 }
 
-# 6. Launch Template (The blueprint for your Server)
-# We need the "ECS-Optimized" AMI. This looks up the latest one automatically.
+# 6. Launch Template
+# Using ECS-Optimized AMI, looked up dynamically
 data "aws_ssm_parameter" "ecs_optimized_ami" {
   name = "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id"
 }
@@ -247,7 +247,7 @@ resource "aws_launch_template" "ecs_nodes" {
     security_groups             = [aws_security_group.ecs_node_sg.id]
   }
 
-  # This script registers the instance to your cluster named "my-cluster"
+  # Registers instance to the ECS cluster
   user_data = base64encode(<<-EOF
               #!/bin/bash
               echo ECS_CLUSTER=${aws_ecs_cluster.main.name} >> /etc/ecs/ecs.config
@@ -256,7 +256,7 @@ resource "aws_launch_template" "ecs_nodes" {
   )
 }
 
-# 7. Auto Scaling Group (Manages the EC2 creation)
+# 7. Auto Scaling Group
 resource "aws_autoscaling_group" "ecs_asg" {
   desired_capacity    = 1
   max_size            = 1
@@ -277,14 +277,14 @@ resource "aws_lb" "main" {
   subnets            = data.aws_subnets.default.ids
 }
 
-# 9. Target Groups (The empty buckets for traffic)
+# 9. Target Groups
 resource "aws_lb_target_group" "apps" {
   for_each    = local.apps
   name        = "${each.key}-tg"
   port        = 80
   protocol    = "HTTP"
   vpc_id      = data.aws_vpc.default.id
-  target_type = "instance" # Important for EC2 mode
+  target_type = "instance"
 
   health_check {
     path = "/health"
@@ -321,7 +321,7 @@ resource "aws_acm_certificate_validation" "main" {
   validation_record_fqdns = [for r in aws_route53_record.acm_validation : r.fqdn]
 }
 
-# 10. Listener (The Traffic Cop)
+# 10. Listeners
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = "80"
@@ -372,7 +372,6 @@ resource "aws_lb_listener_rule" "host_based_routing" {
   }
 }
 # 12. Task Definitions & Services
-# We loop through your apps to save code
 
 resource "aws_cloudwatch_log_group" "ecs" {
   for_each          = local.apps
@@ -386,7 +385,7 @@ resource "aws_ecs_task_definition" "apps" {
   network_mode             = "bridge" # Required for dynamic host ports
   requires_compatibilities = ["EC2"]
   cpu                      = 256
-  memory                   = 256 # Fits apps on a 1GB server easily
+  memory                   = 256
   execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
 
   container_definitions = jsonencode([
@@ -406,8 +405,8 @@ resource "aws_ecs_task_definition" "apps" {
       }
       portMappings = [
         {
-          containerPort = 3000 # Your fixed internal port
-          hostPort      = 0    # The Magic 0 for dynamic mapping
+          containerPort = 3000
+          hostPort      = 0 # Dynamic port mapping
           protocol      = "tcp"
         }
       ]
@@ -428,24 +427,21 @@ resource "aws_ecs_service" "apps" {
   task_definition = aws_ecs_task_definition.apps[each.key].arn
   desired_count   = 1
 
-  # Connects the service to the ALB Target Group
   load_balancer {
     target_group_arn = aws_lb_target_group.apps[each.key].arn
     container_name   = each.key
     container_port   = 3000
   }
 
-  # Allow the service to be created even if the ALB isn't perfectly ready yet
   depends_on = [aws_lb_listener.https]
 }
 
-# 13. Route 53 Hosted Zone (The "Phone Book" for your domain)
+# 13. Route 53 Hosted Zone
 resource "aws_route53_zone" "main" {
   name = "ismysimpleproject.com"
 }
 
-# 14. DNS Records (The "Entries" in the phone book)
-# This loops through your apps and points "app.domain.com" -> ALB
+# 14. DNS Records
 resource "aws_route53_record" "app_aliases" {
   for_each = local.apps
 
@@ -453,8 +449,6 @@ resource "aws_route53_record" "app_aliases" {
   name    = "${each.key}.ismysimpleproject.com" # e.g. eas.ismysimpleproject.com
   type    = "A"
 
-  # The "Alias" block is AWS magic. It points to the ALB internally.
-  # It is faster and cheaper than a CNAME record.
   alias {
     name                   = aws_lb.main.dns_name
     zone_id                = aws_lb.main.zone_id
@@ -462,7 +456,7 @@ resource "aws_route53_record" "app_aliases" {
   }
 }
 
-# Output the Name Servers (You need these for Step 2)
+# Output Name Servers (for domain registrar config)
 output "nameservers" {
   value = aws_route53_zone.main.name_servers
 }
